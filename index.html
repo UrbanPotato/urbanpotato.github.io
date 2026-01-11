@@ -188,17 +188,17 @@
             color: #fff;
             word-break: break-word;
         }
-		
+
         #plotParent {
             background: #2a2a2a;
             border-radius: 12px;
             padding: 20px;
             display: none;
         }
-		
-		#plotParent:has(#plotContainer.active) {
-			display: block;
-		}
+
+        #plotParent:has(#plotContainer.active) {
+            display: block;
+        }
 
         #plotContainer {
             min-height: 600px;
@@ -219,6 +219,62 @@
             padding: 15px;
             margin-bottom: 20px;
             color: #ffaaaa;
+        }
+
+        /* ---- PATCH: controls styled to match, but NOT using .profile-btn ---- */
+        .control-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .control-btn {
+            padding: 10px 20px;
+            background: #3a3a3a;
+            border: 2px solid #4a4a4a;
+            border-radius: 6px;
+            color: #e0e0e0;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .control-btn:hover { border-color:#6a6a6a; }
+
+        .control-btn.primary {
+            background:#0066cc;
+            border-color:#0066cc;
+            color:#fff;
+        }
+        .control-btn.primary:hover { background:#0052a3; border-color:#0052a3; }
+
+        .control-btn.warn {
+            background:#8a3a3a;
+            border-color:#8a3a3a;
+            color:#fff;
+        }
+        .control-btn.warn:hover { background:#a04444; border-color:#a04444; }
+
+        .control-btn-row {
+            display:flex;
+            gap:10px;
+            flex-wrap:wrap;
+            margin-top:10px;
+        }
+
+        .control-input {
+            width: 100%;
+            margin-top: 8px;
+        }
+
+        .control-select {
+            width:100%;
+            margin-top:8px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 2px solid #4a4a4a;
+            background: #2f2f2f;
+            color: #e0e0e0;
+            font-size: 14px;
         }
 
         @media (max-width: 768px) {
@@ -265,11 +321,50 @@
 
         <div class="info-section" id="infoSection">
             <div class="profile-selector" id="profileSelector"></div>
+
+            <!-- ---- PATCH: controls (kept in the same card language) ---- -->
+            <div class="control-row" id="controlRow" style="display:none;">
+                <div class="stat-card" style="border-left-color:#4da6ff;">
+                    <div class="stat-label">Visual Z Span</div>
+                    <input class="control-input" type="range" id="zSpanSlider" min="0.10" max="5.00" step="0.05" value="1.00">
+                    <div class="stat-value" id="zSpanValue" style="font-size:16px;">1.00 mm</div>
+
+                    <div class="control-btn-row">
+                        <button class="control-btn primary" id="autoZBtn" type="button">AUTO</button>
+                        <button class="control-btn" id="resetViewBtn" type="button">Reset View</button>
+                        <button class="control-btn" id="exportCsvBtn" type="button">Export CSV</button>
+                    </div>
+
+                    <div class="stat-label" style="margin-top:10px; text-transform:none; letter-spacing:0;">
+                        AUTO sets visual span to true flatness. Slider caps at 5.00 mm.
+                    </div>
+                </div>
+
+                <div class="stat-card" style="border-left-color:#ffaa00;">
+                    <div class="stat-label">Saved Meshes</div>
+
+                    <select class="control-select" id="savedMeshSelect"></select>
+
+                    <div class="control-btn-row">
+                        <button class="control-btn primary" id="saveMeshBtn" type="button">Save</button>
+                        <button class="control-btn" id="loadMeshBtn" type="button">Load</button>
+                        <button class="control-btn" id="renameMeshBtn" type="button">Rename</button>
+                        <button class="control-btn warn" id="deleteMeshBtn" type="button">Delete</button>
+                        <button class="control-btn warn" id="clearAllBtn" type="button">Clear All</button>
+                    </div>
+
+                    <div class="stat-label" style="margin-top:10px; text-transform:none; letter-spacing:0;">
+                        Delta card uses the selected saved mesh as reference.
+                    </div>
+                </div>
+            </div>
+
             <div class="stats" id="statsContainer"></div>
         </div>
-		<div id="plotParent">
-			<div id="plotContainer"></div>
-		</div>
+
+        <div id="plotParent">
+            <div id="plotContainer"></div>
+        </div>
     </div>
 
     <script>
@@ -283,7 +378,30 @@
         let parsedProfiles = {};
         let currentProfile = null;
 
-        // Create downloadable M8803.gcode file
+        // ---- PATCH: maintain a "current mesh" handle so saved meshes can load without breaking profile UI
+        let currentMesh = null;
+        let currentMeshLabel = '';
+
+        // ---- PATCH: visual Z span (mm)
+        let visualZSpan = 1.00; // mm, 0.10..5.00
+
+        // ---- PATCH: front-facing view (looking at printer from the front)
+        const FRONT_CAMERA = {
+            eye: { x: 0, y: -2.0, z: 1.2 },
+            center: { x: 0, y: 0, z: 0 },
+            up: { x: 0, y: 0, z: 1 }
+        };
+
+        // ---- PATCH: localStorage saved meshes
+        const STORAGE_KEY = 'cc_saved_meshes_v3';
+        let savedMeshes = [];
+        try {
+            savedMeshes = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') || [];
+        } catch (e) {
+            savedMeshes = [];
+        }
+
+        // Create downloadable M8803.gcode file (original)
         document.getElementById('gcodeDownload').addEventListener('click', function(e) {
             e.preventDefault();
             const blob = new Blob(['M8803'], { type: 'text/plain' });
@@ -306,8 +424,100 @@
             document.getElementById('errorContainer').innerHTML = '';
         }
 
+        function persistSavedMeshes() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(savedMeshes));
+        }
+
+        function computeFlatness(points2d) {
+            const flat = points2d.flat();
+            return Math.max(...flat) - Math.min(...flat);
+        }
+
+        function mean(arr) {
+            let s = 0;
+            for (const v of arr) s += v;
+            return arr.length ? (s / arr.length) : 0;
+        }
+
+        // ---- PATCH: scale mesh visually so total shown span is targetSpan mm
+        function scalePointsToZSpan(points2d, targetSpan) {
+            const flat = points2d.flat();
+            const minZ = Math.min(...flat);
+            const maxZ = Math.max(...flat);
+            const span = maxZ - minZ;
+
+            if (span <= 0) return points2d;
+
+            const m = mean(flat);
+            const scale = targetSpan / span;
+            return points2d.map(row => row.map(z => m + (z - m) * scale));
+        }
+
+        function exportMeshCSV(mesh, label) {
+            const { points, configs } = mesh;
+            const rows = [];
+            rows.push(`# ${label || 'Bed Mesh'}`);
+            rows.push('x_mm,y_mm,z_mm');
+
+            for (let y = 0; y < configs.y_count; y++) {
+                for (let x = 0; x < configs.x_count; x++) {
+                    const xPos = configs.min_x + (configs.max_x - configs.min_x) * x / (configs.x_count - 1);
+                    const yPos = configs.min_y + (configs.max_y - configs.min_y) * y / (configs.y_count - 1);
+                    rows.push(`${xPos.toFixed(3)},${yPos.toFixed(3)},${points[y][x].toFixed(6)}`);
+                }
+            }
+
+            const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = (label || 'bed_mesh').replace(/[^\w\-]+/g,'_').toLowerCase() + '.csv';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function renderSavedDropdown() {
+            const sel = document.getElementById('savedMeshSelect');
+            sel.innerHTML = '';
+
+            const optNone = document.createElement('option');
+            optNone.value = '__none__';
+            optNone.textContent = 'Delta reference: (none)';
+            sel.appendChild(optNone);
+
+            if (savedMeshes.length) {
+                const optLast = document.createElement('option');
+                optLast.value = '__last__';
+                optLast.textContent = `Delta reference: LAST saved (${savedMeshes[savedMeshes.length - 1].label})`;
+                sel.appendChild(optLast);
+            }
+
+            savedMeshes.forEach((m, i) => {
+                const o = document.createElement('option');
+                o.value = String(i);
+                o.textContent = m.label;
+                sel.appendChild(o);
+            });
+
+            // ✅ Auto-select last saved as delta reference on page load (and after render)
+            sel.value = savedMeshes.length ? '__last__' : '__none__';
+        }
+
+        function getSelectedSavedIndex() {
+            const sel = document.getElementById('savedMeshSelect');
+            const v = sel.value;
+
+            if (v === '__none__') return null;
+            if (v === '__last__') return savedMeshes.length ? (savedMeshes.length - 1) : null;
+
+            const idx = parseInt(v, 10);
+            return Number.isFinite(idx) ? idx : null;
+        }
+
         function parseProfile(configContent, sectionName) {
-            // Try to find the section with a lookahead to next section or end of file
+            // ORIGINAL parser, unchanged
             let sectionPattern = new RegExp(`\\[${sectionName}\\]([\\s\\S]*?)(?=\\n\\[|$)`, 'i');
             let sectionMatch = configContent.match(sectionPattern);
 
@@ -317,7 +527,6 @@
 
             const sectionStr = sectionMatch[1];
 
-            // Extract points
             const meshPointsMatch = sectionStr.match(/points\s*:\s*([-\d.,\s]+)/i);
             if (!meshPointsMatch) {
                 return null;
@@ -325,7 +534,6 @@
 
             const meshPointsStr = meshPointsMatch[1];
 
-            // Helper to extract config values
             function extractMeshConfig(key, defaultValue) {
                 const match = sectionStr.match(new RegExp(`${key}\\s*:\\s*([\\d.]+)`, 'i'));
                 return match ? parseFloat(match[1]) : defaultValue;
@@ -340,7 +548,6 @@
                 y_count: parseInt(extractMeshConfig('y_count', 11))
             };
 
-            // Parse points
             const meshPoints = meshPointsStr.split(',')
                 .map(p => p.trim())
                 .filter(p => p.length > 0)
@@ -352,7 +559,6 @@
                 return null;
             }
 
-            // Reshape into 2D array (x_count rows, y_count columns)
             const points = [];
             for (let i = 0; i < meshConfigs.y_count; i++) {
                 points.push(meshPoints.slice(i * meshConfigs.x_count, (i + 1) * meshConfigs.x_count));
@@ -364,11 +570,11 @@
             };
         }
 
-        function createPlot(profileKey, mesh) {
-            const points = mesh.points;
+        function createPlot(profileKey, mesh, labelOverride) {
+            const rawPoints = mesh.points;
             const configs = mesh.configs;
 
-            // Create coordinate arrays
+            // Create coordinate arrays (original)
             const xCoords = [];
             const yCoords = [];
             for (let i = 0; i < configs.x_count; i++) {
@@ -378,13 +584,27 @@
                 yCoords.push(configs.min_y + (configs.max_y - configs.min_y) * i / (configs.y_count - 1));
             }
 
-            // Calculate statistics
-            const flatPoints = points.flat();
+            // Stats (true)
+            const flatPoints = rawPoints.flat();
             const minZ = Math.min(...flatPoints);
             const maxZ = Math.max(...flatPoints);
             const flatnessDev = maxZ - minZ;
 
-            // Update stats display
+            // PATCH: delta vs selected reference
+            let deltaCard = '';
+            const refIdx = getSelectedSavedIndex();
+            if (refIdx !== null && savedMeshes[refIdx] && typeof savedMeshes[refIdx].flatness === 'number') {
+                const ref = savedMeshes[refIdx];
+                const d = flatnessDev - ref.flatness;
+                deltaCard = `
+                    <div class="stat-card">
+                        <div class="stat-label">Δ Flatness vs Reference</div>
+                        <div class="stat-value">${d.toFixed(5)} mm</div>
+                    </div>
+                `;
+            }
+
+            // Update stats display (original + optional delta)
             document.getElementById('statsContainer').innerHTML = `
                 <div class="stat-card">
                     <div class="stat-label">Min Height</div>
@@ -402,27 +622,37 @@
                     <div class="stat-label">Grid Size</div>
                     <div class="stat-value">${configs.x_count} × ${configs.y_count}</div>
                 </div>
+                ${deltaCard}
             `;
 
-            // Create z=0 reference plane
+            // Create z=0 plane (original)
             const zeroPlane = Array(2).fill(null).map(() => Array(2).fill(0));
             const planeX = [configs.min_x, configs.max_x];
             const planeY = [configs.min_y, configs.max_y];
 
-            // Create 3D surface plot
+            // PATCH: visual scaling to target Z span
+            const shownPoints = scalePointsToZSpan(rawPoints, visualZSpan);
+
             const data = [
                 {
                     type: 'surface',
                     x: xCoords,
                     y: yCoords,
-                    z: points,
+                    z: shownPoints,
                     colorscale: 'RdBu',
                     reversescale: false,
                     colorbar: {
                         title: 'Height (mm)',
                         titleside: 'right'
                     },
-                    name: 'Bed Mesh'
+                    name: 'Bed Mesh',
+                    customdata: rawPoints,
+                    hovertemplate:
+                        'X: %{x:.1f} mm<br>' +
+                        'Y: %{y:.1f} mm<br>' +
+                        'Z true: %{customdata:.5f} mm<br>' +
+                        'Z shown: %{z:.5f} mm' +
+                        '<extra></extra>'
                 },
                 {
                     type: 'surface',
@@ -436,9 +666,11 @@
                 }
             ];
 
+            const displayName = labelOverride || profiles[profileKey]?.[1] || 'Bed Mesh';
+
             const layout = {
                 title: {
-                    text: `Bed Mesh: ${profiles[profileKey][1]}<br><sub>Flatness deviation: ${flatnessDev.toFixed(3)} mm</sub>`,
+                    text: `Bed Mesh: ${displayName}<br><sub>Flatness deviation (true): ${flatnessDev.toFixed(3)} mm • Visual span: ${visualZSpan.toFixed(2)} mm</sub>`,
                     font: { color: '#e0e0e0' }
                 },
                 scene: {
@@ -462,16 +694,19 @@
                 displaylogo: false
             };
 
-            // Check if plot already exists and preserve camera position
+            // Preserve camera (original behavior) OR use front camera on first render
             const plotContainer = document.getElementById('plotContainer');
             if (plotContainer.data && plotContainer.layout && plotContainer.layout.scene) {
-                // Preserve the current camera position
                 layout.scene.camera = plotContainer.layout.scene.camera;
+            } else {
+                layout.scene.camera = FRONT_CAMERA;
             }
 
             Plotly.react('plotContainer', data, layout, config);
-            
-            // Force resize to ensure proper width
+
+            // Ensure plot parent visible even if :has unsupported
+            document.getElementById('plotParent').style.display = 'block';
+
             setTimeout(() => {
                 Plotly.Plots.resize('plotContainer');
             }, 100);
@@ -481,12 +716,28 @@
             currentProfile = profileKey;
             const mesh = parsedProfiles[profileKey];
 
-            // Update active button
-            document.querySelectorAll('.profile-btn').forEach(btn => {
+            // IMPORTANT PATCH: only toggle active state for REAL profile buttons
+            document.querySelectorAll('#profileSelector .profile-btn').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.profile === profileKey);
             });
 
-            createPlot(profileKey, mesh);
+            // Track current mesh
+            currentMesh = mesh;
+            currentMeshLabel = profiles[profileKey][1];
+
+            createPlot(profileKey, mesh, currentMeshLabel);
+            document.getElementById('plotContainer').classList.add('active');
+        }
+
+        function displaySavedMesh(entry) {
+            // Clear active profile highlight
+            document.querySelectorAll('#profileSelector .profile-btn').forEach(btn => btn.classList.remove('active'));
+
+            currentProfile = '__saved__';
+            currentMesh = entry.mesh;
+            currentMeshLabel = `Saved: ${entry.label}`;
+
+            createPlot('__saved__', currentMesh, currentMeshLabel);
             document.getElementById('plotContainer').classList.add('active');
         }
 
@@ -494,7 +745,6 @@
             clearError();
             parsedProfiles = {};
 
-            // Parse all available profiles
             for (const [key, [sectionName, displayName]] of Object.entries(profiles)) {
                 const mesh = parseProfile(content, sectionName);
                 if (mesh) {
@@ -507,10 +757,10 @@
                     Object.values(profiles).map(p => p[0]).join(', '));
                 document.getElementById('infoSection').classList.remove('active');
                 document.getElementById('plotContainer').classList.remove('active');
+                document.getElementById('controlRow').style.display = 'none';
                 return;
             }
 
-            // Create profile selector buttons
             const profileSelector = document.getElementById('profileSelector');
             profileSelector.innerHTML = '';
 
@@ -523,13 +773,21 @@
                 profileSelector.appendChild(btn);
             }
 
-            // Show the first profile by default
-            const firstProfile = Object.keys(parsedProfiles)[0];
             document.getElementById('infoSection').classList.add('active');
+            document.getElementById('controlRow').style.display = 'grid';
+
+            // Show first profile by default
+            const firstProfile = Object.keys(parsedProfiles)[0];
             displayProfile(firstProfile);
         }
 
-        // File upload handler
+        function rerenderIfReady() {
+            if (currentMesh) {
+                createPlot(currentProfile || 'standard', currentMesh, currentMeshLabel);
+            }
+        }
+
+        // File upload handler (original)
         document.getElementById('fileInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
@@ -546,7 +804,7 @@
             reader.readAsText(file);
         });
 
-        // Drag and drop support
+        // Drag and drop support (original)
         const uploadSection = document.querySelector('.upload-section');
 
         uploadSection.addEventListener('dragover', (e) => {
@@ -573,6 +831,119 @@
                     processFile(event.target.result);
                 };
                 reader.readAsText(file);
+            }
+        });
+
+        // ---- PATCH: wire controls ----
+        const zSpanSlider = document.getElementById('zSpanSlider');
+        const zSpanValue = document.getElementById('zSpanValue');
+
+        function setVisualSpan(v) {
+            // clamp 0.10..5.00
+            const clamped = Math.max(0.10, Math.min(5.00, v));
+            visualZSpan = clamped;
+            zSpanSlider.value = String(clamped);
+            zSpanValue.textContent = `${clamped.toFixed(2)} mm`;
+        }
+
+        // default 1.00 mm
+        setVisualSpan(1.00);
+
+        zSpanSlider.addEventListener('input', () => {
+            setVisualSpan(parseFloat(zSpanSlider.value));
+            rerenderIfReady();
+        });
+
+        document.getElementById('autoZBtn').addEventListener('click', () => {
+            if (!currentMesh) return;
+            const trueFlatness = computeFlatness(currentMesh.points);
+            setVisualSpan(trueFlatness);
+            rerenderIfReady();
+        });
+
+        // ✅ PATCH: reset view ALSO resets scaling to 1.00 mm
+        document.getElementById('resetViewBtn').addEventListener('click', () => {
+            Plotly.relayout('plotContainer', { 'scene.camera': FRONT_CAMERA });
+            setVisualSpan(1.00);
+            rerenderIfReady();
+        });
+
+        document.getElementById('exportCsvBtn').addEventListener('click', () => {
+            if (!currentMesh) return;
+            exportMeshCSV(currentMesh, currentMeshLabel || 'bed_mesh');
+        });
+
+        // ---- PATCH: saved mesh CRUD ----
+        renderSavedDropdown(); // ✅ already auto-selects __last__ if any exist
+
+        document.getElementById('saveMeshBtn').addEventListener('click', () => {
+            if (!currentMesh) return;
+
+            const stamp = new Date().toLocaleString();
+            const base = currentMeshLabel || 'Mesh';
+            const label = `${base} @ ${stamp}`;
+
+            savedMeshes.push({
+                label,
+                saved_at: stamp,
+                flatness: computeFlatness(currentMesh.points),
+                mesh: JSON.parse(JSON.stringify(currentMesh))
+            });
+
+            persistSavedMeshes();
+            renderSavedDropdown();
+            rerenderIfReady(); // if delta reference is __last__
+        });
+
+        document.getElementById('loadMeshBtn').addEventListener('click', () => {
+            const idx = getSelectedSavedIndex();
+            if (idx === null || !savedMeshes[idx]) return;
+            displaySavedMesh(savedMeshes[idx]);
+        });
+
+        document.getElementById('renameMeshBtn').addEventListener('click', () => {
+            const idx = getSelectedSavedIndex();
+            if (idx === null || !savedMeshes[idx]) return;
+
+            const next = prompt('Rename saved mesh:', savedMeshes[idx].label);
+            if (!next) return;
+
+            savedMeshes[idx].label = next.trim();
+            persistSavedMeshes();
+            renderSavedDropdown();
+            rerenderIfReady();
+        });
+
+        document.getElementById('deleteMeshBtn').addEventListener('click', () => {
+            const idx = getSelectedSavedIndex();
+            if (idx === null || !savedMeshes[idx]) return;
+
+            if (!confirm(`Delete saved mesh?\n\n${savedMeshes[idx].label}`)) return;
+
+            savedMeshes.splice(idx, 1);
+            persistSavedMeshes();
+            renderSavedDropdown();
+            rerenderIfReady();
+        });
+
+        document.getElementById('clearAllBtn').addEventListener('click', () => {
+            if (!confirm('Delete ALL saved meshes from this browser?')) return;
+            savedMeshes = [];
+            persistSavedMeshes();
+            renderSavedDropdown();
+            rerenderIfReady();
+        });
+
+        // ✅ PATCH: dropdown change auto-loads mesh (and also updates delta when choosing __last__/__none__)
+        document.getElementById('savedMeshSelect').addEventListener('change', () => {
+            const idx = getSelectedSavedIndex();
+
+            if (idx !== null && savedMeshes[idx]) {
+                // auto-load selected mesh
+                displaySavedMesh(savedMeshes[idx]);
+            } else {
+                // just refresh delta card
+                rerenderIfReady();
             }
         });
     </script>
