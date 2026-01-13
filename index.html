@@ -333,6 +333,9 @@
                         <button class="control-btn primary" id="autoZBtn" type="button">AUTO</button>
                         <button class="control-btn" id="resetViewBtn" type="button">Reset View</button>
                         <button class="control-btn" id="exportCsvBtn" type="button">Export CSV</button>
+
+                        <button class="control-btn" id="simulateTiltBtn" type="button">Simulate Screw Adjust</button>
+
                     </div>
 
                     <div class="stat-label" style="margin-top:10px; text-transform:none; letter-spacing:0;">
@@ -382,6 +385,10 @@
         let currentMesh = null;
         let currentMeshLabel = '';
 
+
+        // ---- PATCH: keep an immutable 'real' mesh so simulation can be toggled/reset cleanly
+        let realMesh = null;
+        let realMeshLabel = '';
         // ---- PATCH: visual Z span (mm)
         let visualZSpan = 1.00; // mm, 0.10..5.00
 
@@ -423,6 +430,92 @@
         function clearError() {
             document.getElementById('errorContainer').innerHTML = '';
         }
+
+
+        // ==========================
+        // ---- TILT SCREW CARD -----
+        // ==========================
+
+        // ---- Simulate tilt screw adjustment (corner plane correction) ----
+        function simulateTiltAdjustment(mesh) {
+            const pts = mesh.points;
+            const rows = pts.length;
+            const cols = pts[0].length;
+
+            // Corner heights
+            const fl = pts[0][0];
+            const fr = pts[0][cols - 1];
+            const rl = pts[rows - 1][0];
+            const rr = pts[rows - 1][cols - 1];
+
+            // Target is average of corners
+            const target = (fl + fr + rl + rr) / 4;
+
+            // Corner deltas (what screws would correct)
+            const dFL = fl - target;
+            const dFR = fr - target;
+            const dRL = rl - target;
+            const dRR = rr - target;
+
+            // Apply bilinear plane correction across mesh
+            const newPts = [];
+            for (let y = 0; y < rows; y++) {
+                const ty = y / (rows - 1);
+                const row = [];
+                for (let x = 0; x < cols; x++) {
+                    const tx = x / (cols - 1);
+
+                    // Interpolated corner offset
+                    const corr =
+                        dFL * (1 - tx) * (1 - ty) +
+                        dFR * tx * (1 - ty) +
+                        dRL * (1 - tx) * ty +
+                        dRR * tx * ty;
+
+                    row.push(pts[y][x] - corr);
+                }
+                newPts.push(row);
+            }
+
+            return {
+                points: newPts,
+                configs: JSON.parse(JSON.stringify(mesh.configs))
+            };
+        }
+
+        const SCREW_PITCH_MM = 0.7; // M4 sex-nut, mm per full turn
+
+        const FRACTIONS = [
+            { label: '1/16', turns: 1/16 },
+            { label: '1/8',  turns: 1/8  },
+            { label: '3/16', turns: 3/16 },
+            { label: '1/4',  turns: 1/4  },
+            { label: '5/16', turns: 5/16 },
+            { label: '3/8',  turns: 3/8  }
+        ];
+
+        function mmToFraction(mm) {
+            const turns = mm / SCREW_PITCH_MM;
+            const sign = turns < 0 ? -1 : 1;
+            const absTurns = Math.abs(turns);
+
+            let best = FRACTIONS[0];
+            let minErr = Infinity;
+
+            for (const f of FRACTIONS) {
+                const err = Math.abs(absTurns - f.turns);
+                if (err < minErr) {
+                    minErr = err;
+                    best = f;
+                }
+            }
+
+            return {
+                signed: (sign < 0 ? '-' : '+') + best.label,
+                direction: sign < 0 ? 'loosen' : 'tighten'
+            };
+        }
+        // ==========================
 
         function persistSavedMeshes() {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(savedMeshes));
@@ -625,6 +718,40 @@
                 ${deltaCard}
             `;
 
+            // ---- Tilt screw card (corners only, informational) ----
+            (function renderTiltCard() {
+                const rows = rawPoints.length;
+                const cols = rawPoints[0].length;
+
+                const corners = {
+                    'Front-Left':  rawPoints[0][0],
+                    'Front-Right': rawPoints[0][cols - 1],
+                    'Rear-Left':   rawPoints[rows - 1][0],
+                    'Rear-Right':  rawPoints[rows - 1][cols - 1]
+                };
+
+                let html = '';
+                for (const [name, z] of Object.entries(corners)) {
+                    const adj = mmToFraction(z);
+                    html += `
+                        <div style="margin-bottom:6px;">
+                            <strong>${name}</strong>: ${z.toFixed(3)} mm →
+                            ${adj.signed} turn
+                            <span style="color:#aaa;">(${adj.direction})</span>
+                        </div>
+                    `;
+                }
+
+                document.getElementById('statsContainer').innerHTML += `
+                    <div class="stat-card">
+                        <div class="stat-label">Tilt Screws (M4 · 0.7 mm/turn)</div>
+                        <div class="stat-value" style="font-size:14px; line-height:1.4;">
+                            ${html}
+                        </div>
+                    </div>
+                `;
+            })();
+
             // Create z=0 plane (original)
             const zeroPlane = Array(2).fill(null).map(() => Array(2).fill(0));
             const planeX = [configs.min_x, configs.max_x];
@@ -713,33 +840,41 @@
         }
 
         function displayProfile(profileKey) {
-            currentProfile = profileKey;
-            const mesh = parsedProfiles[profileKey];
+    currentProfile = profileKey;
+    const mesh = parsedProfiles[profileKey];
 
-            // IMPORTANT PATCH: only toggle active state for REAL profile buttons
-            document.querySelectorAll('#profileSelector .profile-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.profile === profileKey);
-            });
+    // IMPORTANT PATCH: only toggle active state for REAL profile buttons
+    document.querySelectorAll('#profileSelector .profile-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.profile === profileKey);
+    });
 
-            // Track current mesh
-            currentMesh = mesh;
-            currentMeshLabel = profiles[profileKey][1];
+    // Track current mesh (REAL)
+    realMesh = JSON.parse(JSON.stringify(mesh));
+    realMeshLabel = profiles[profileKey][1];
 
-            createPlot(profileKey, mesh, currentMeshLabel);
-            document.getElementById('plotContainer').classList.add('active');
-        }
+    currentMesh = realMesh;
+    currentMeshLabel = realMeshLabel;
+
+    createPlot(profileKey, currentMesh, currentMeshLabel);
+    document.getElementById('plotContainer').classList.add('active');
+}
 
         function displaySavedMesh(entry) {
-            // Clear active profile highlight
-            document.querySelectorAll('#profileSelector .profile-btn').forEach(btn => btn.classList.remove('active'));
+    // Clear active profile highlight
+    document.querySelectorAll('#profileSelector .profile-btn').forEach(btn => btn.classList.remove('active'));
 
-            currentProfile = '__saved__';
-            currentMesh = entry.mesh;
-            currentMeshLabel = `Saved: ${entry.label}`;
+    currentProfile = '__saved__';
 
-            createPlot('__saved__', currentMesh, currentMeshLabel);
-            document.getElementById('plotContainer').classList.add('active');
-        }
+    // Track current mesh (REAL)
+    realMesh = JSON.parse(JSON.stringify(entry.mesh));
+    realMeshLabel = `Saved: ${entry.label}`;
+
+    currentMesh = realMesh;
+    currentMeshLabel = realMeshLabel;
+
+    createPlot('__saved__', currentMesh, currentMeshLabel);
+    document.getElementById('plotContainer').classList.add('active');
+}
 
         function processFile(content) {
             clearError();
@@ -862,13 +997,31 @@
         });
 
         // ✅ PATCH: reset view ALSO resets scaling to 1.00 mm
-        document.getElementById('resetViewBtn').addEventListener('click', () => {
-            Plotly.relayout('plotContainer', { 'scene.camera': FRONT_CAMERA });
-            setVisualSpan(1.00);
-            rerenderIfReady();
-        });
+        // ✅ PATCH: reset view ALSO resets scaling to 1.00 mm AND returns to the REAL mesh
+document.getElementById('resetViewBtn').addEventListener('click', () => {
+    Plotly.relayout('plotContainer', { 'scene.camera': FRONT_CAMERA });
+    setVisualSpan(1.00);
 
-        document.getElementById('exportCsvBtn').addEventListener('click', () => {
+    if (realMesh) {
+        currentMesh = realMesh;
+        currentMeshLabel = realMeshLabel;
+    }
+
+    rerenderIfReady();
+});
+
+        
+        // ---- Simulate screw adjustment button ----
+        // ---- Simulate screw adjustment button ----
+document.getElementById('simulateTiltBtn').addEventListener('click', () => {
+    if (!realMesh) return;
+
+    // Always simulate from the REAL mesh so repeated clicks don't drift or re-append labels
+    currentMesh = simulateTiltAdjustment(realMesh);
+    currentMeshLabel = realMeshLabel + ' (simulated)';
+    rerenderIfReady();
+});
+document.getElementById('exportCsvBtn').addEventListener('click', () => {
             if (!currentMesh) return;
             exportMeshCSV(currentMesh, currentMeshLabel || 'bed_mesh');
         });
